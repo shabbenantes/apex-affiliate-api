@@ -4,12 +4,6 @@ services:
     env: node
     buildCommand: npm install
     startCommand: npm start
-    # Persistent disk for SQLite database (requires paid plan)
-    # Comment out if using free tier (sessions will be lost on restart)
-    disk:
-      name: auth-data
-      mountPath: /opt/render/project/data
-      sizeGB: 1
     envVars:
       - key: GHL_API_KEY
         sync: false
@@ -17,7 +11,9 @@ services:
         value: JLAe4EMlLxFUSRAh1pB3
       - key: SITE_URL
         value: https://getapexautomation.com
-      - key: DATA_DIR
-        value: /opt/render/project/data
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
       - key: NODE_ENV
         value: production

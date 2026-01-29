@@ -1,23 +1,21 @@
 const express = require('express');
 const cors = require('cors');
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
+const { createClient } = require('@libsql/client');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// GHL Configuration (still used for contact lookup and email sending)
+// GHL Configuration (for contact lookup and email sending)
 const GHL_API_BASE = 'https://services.leadconnectorhq.com';
 const GHL_API_KEY = process.env.GHL_API_KEY || 'pit-20267a00-312f-4afb-96e1-3fa2c0ba37d8';
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || 'JLAe4EMlLxFUSRAh1pB3';
 const SITE_URL = process.env.SITE_URL || 'https://getapexautomation.com';
 
-// Database path - use persistent directory on Render if available
-const DATA_DIR = process.env.DATA_DIR || '/opt/render/project/data';
-const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, 'auth.db');
+// Turso Database Configuration
+const TURSO_DATABASE_URL = process.env.TURSO_DATABASE_URL;
+const TURSO_AUTH_TOKEN = process.env.TURSO_AUTH_TOKEN;
 
-// GHL Custom Field IDs (for affiliate data, not tokens)
+// GHL Custom Field IDs (for affiliate data)
 const FIELD_IDS = {
   affiliateCode: '6vixXMn6Co7zax0Z26o8',
   totalReferrals: 'gsv2PY19XMQD02YkmTbL',
@@ -31,21 +29,23 @@ const FIELD_IDS = {
 };
 
 // ============================================
-// DATABASE INITIALIZATION
+// DATABASE INITIALIZATION (Turso)
 // ============================================
 let db;
 
-function initDatabase() {
-  // Ensure data directory exists
-  const dataDir = path.dirname(DB_PATH);
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
+async function initDatabase() {
+  if (!TURSO_DATABASE_URL || !TURSO_AUTH_TOKEN) {
+    console.error('ERROR: TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be set');
+    process.exit(1);
   }
 
-  db = new Database(DB_PATH);
+  db = createClient({
+    url: TURSO_DATABASE_URL,
+    authToken: TURSO_AUTH_TOKEN
+  });
 
   // Create tokens table
-  db.exec(`
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS tokens (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       email TEXT NOT NULL,
@@ -54,22 +54,26 @@ function initDatabase() {
       contact_id TEXT,
       expires_at TEXT NOT NULL,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);
-    CREATE INDEX IF NOT EXISTS idx_tokens_email_type ON tokens(email, type);
-    CREATE INDEX IF NOT EXISTS idx_tokens_expires_at ON tokens(expires_at);
+    )
   `);
 
-  console.log(`Database initialized at ${DB_PATH}`);
+  // Create indexes
+  await db.execute('CREATE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token)');
+  await db.execute('CREATE INDEX IF NOT EXISTS idx_tokens_email_type ON tokens(email, type)');
+  await db.execute('CREATE INDEX IF NOT EXISTS idx_tokens_expires_at ON tokens(expires_at)');
+
+  console.log('Turso database initialized');
 }
 
-// Clean up expired tokens periodically
-function cleanupExpiredTokens() {
+// Clean up expired tokens
+async function cleanupExpiredTokens() {
   const now = new Date().toISOString();
-  const result = db.prepare('DELETE FROM tokens WHERE expires_at < ?').run(now);
-  if (result.changes > 0) {
-    console.log(`Cleaned up ${result.changes} expired tokens`);
+  const result = await db.execute({
+    sql: 'DELETE FROM tokens WHERE expires_at < ?',
+    args: [now]
+  });
+  if (result.rowsAffected > 0) {
+    console.log(`Cleaned up ${result.rowsAffected} expired tokens`);
   }
 }
 
@@ -77,11 +81,14 @@ function cleanupExpiredTokens() {
 app.use(cors());
 app.use(express.json());
 
-// Clean up expired tokens on each request (lightweight operation)
-app.use((req, res, next) => {
-  cleanupExpiredTokens();
-  next();
-});
+// Clean up expired tokens periodically (not on every request to reduce DB calls)
+setInterval(async () => {
+  try {
+    await cleanupExpiredTokens();
+  } catch (err) {
+    console.error('Cleanup error:', err);
+  }
+}, 60000); // Every minute
 
 // Helper: GHL API request
 async function ghlRequest(endpoint, options = {}) {
@@ -168,13 +175,16 @@ app.post('/api/magic-link-request', async (req, res) => {
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
     // Delete any existing magic link tokens for this email
-    db.prepare('DELETE FROM tokens WHERE email = ? AND type = ?').run(normalizedEmail, 'magic_link');
+    await db.execute({
+      sql: 'DELETE FROM tokens WHERE email = ? AND type = ?',
+      args: [normalizedEmail, 'magic_link']
+    });
 
-    // Store token in SQLite
-    db.prepare(`
-      INSERT INTO tokens (email, token, type, contact_id, expires_at)
-      VALUES (?, ?, 'magic_link', ?, ?)
-    `).run(normalizedEmail, token, contact.id, expiresAt);
+    // Store token in Turso
+    await db.execute({
+      sql: 'INSERT INTO tokens (email, token, type, contact_id, expires_at) VALUES (?, ?, ?, ?, ?)',
+      args: [normalizedEmail, token, 'magic_link', contact.id, expiresAt]
+    });
 
     // Send magic link email via GHL
     const magicLinkUrl = `${SITE_URL}/affiliate-portal.html?token=${token}`;
@@ -224,19 +234,20 @@ app.post('/api/magic-link-verify', async (req, res) => {
       return res.json({ success: false, message: 'This link has expired or is invalid. Please request a new one.' });
     }
 
-    // Look up token in SQLite
-    const tokenRow = db.prepare(`
-      SELECT * FROM tokens WHERE token = ? AND type = 'magic_link'
-    `).get(token);
+    // Look up token in Turso
+    const result = await db.execute({
+      sql: 'SELECT * FROM tokens WHERE token = ? AND type = ?',
+      args: [token, 'magic_link']
+    });
 
+    const tokenRow = result.rows[0];
     if (!tokenRow) {
       return res.json({ success: false, message: 'This link has expired or is invalid. Please request a new one.' });
     }
 
     // Check if token is expired
     if (new Date(tokenRow.expires_at) < new Date()) {
-      // Delete expired token
-      db.prepare('DELETE FROM tokens WHERE id = ?').run(tokenRow.id);
+      await db.execute({ sql: 'DELETE FROM tokens WHERE id = ?', args: [tokenRow.id] });
       return res.json({ success: false, message: 'This link has expired or is invalid. Please request a new one.' });
     }
 
@@ -257,16 +268,19 @@ app.post('/api/magic-link-verify', async (req, res) => {
     const sessionExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
     // Delete any existing session tokens for this email
-    db.prepare('DELETE FROM tokens WHERE email = ? AND type = ?').run(tokenRow.email, 'session');
+    await db.execute({
+      sql: 'DELETE FROM tokens WHERE email = ? AND type = ?',
+      args: [tokenRow.email, 'session']
+    });
 
-    // Store session token in SQLite
-    db.prepare(`
-      INSERT INTO tokens (email, token, type, contact_id, expires_at)
-      VALUES (?, ?, 'session', ?, ?)
-    `).run(tokenRow.email, sessionToken, contact.id, sessionExpiry);
+    // Store session token in Turso
+    await db.execute({
+      sql: 'INSERT INTO tokens (email, token, type, contact_id, expires_at) VALUES (?, ?, ?, ?, ?)',
+      args: [tokenRow.email, sessionToken, 'session', contact.id, sessionExpiry]
+    });
 
     // Delete the used magic link token
-    db.prepare('DELETE FROM tokens WHERE id = ?').run(tokenRow.id);
+    await db.execute({ sql: 'DELETE FROM tokens WHERE id = ?', args: [tokenRow.id] });
 
     console.log(`Session created for ${tokenRow.email}`);
 
@@ -297,19 +311,20 @@ app.post('/api/affiliate-validate', async (req, res) => {
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Look up session token in SQLite
-    const sessionRow = db.prepare(`
-      SELECT * FROM tokens WHERE token = ? AND email = ? AND type = 'session'
-    `).get(token, normalizedEmail);
+    // Look up session token in Turso
+    const result = await db.execute({
+      sql: 'SELECT * FROM tokens WHERE token = ? AND email = ? AND type = ?',
+      args: [token, normalizedEmail, 'session']
+    });
 
+    const sessionRow = result.rows[0];
     if (!sessionRow) {
       return res.json({ success: false, message: 'Session expired. Please log in again.' });
     }
 
     // Check if session is expired
     if (new Date(sessionRow.expires_at) < new Date()) {
-      // Delete expired session
-      db.prepare('DELETE FROM tokens WHERE id = ?').run(sessionRow.id);
+      await db.execute({ sql: 'DELETE FROM tokens WHERE id = ?', args: [sessionRow.id] });
       return res.json({ success: false, message: 'Session expired. Please log in again.' });
     }
 
@@ -337,28 +352,31 @@ app.post('/api/affiliate-validate', async (req, res) => {
 });
 
 // Health check endpoint
-app.get('/health', (req, res) => {
-  const tokenCount = db.prepare('SELECT COUNT(*) as count FROM tokens').get();
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    database: DB_PATH,
-    activeTokens: tokenCount.count
-  });
-});
-
-// Debug endpoint (remove in production)
-app.get('/api/debug/tokens', (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
-    return res.status(404).json({ error: 'Not found' });
+app.get('/health', async (req, res) => {
+  try {
+    const result = await db.execute('SELECT COUNT(*) as count FROM tokens');
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      database: 'turso',
+      activeTokens: result.rows[0].count
+    });
+  } catch (error) {
+    res.json({
+      status: 'error',
+      timestamp: new Date().toISOString(),
+      error: error.message
+    });
   }
-  const tokens = db.prepare('SELECT id, email, type, expires_at, created_at FROM tokens').all();
-  res.json({ tokens });
 });
 
 // Initialize database and start server
-initDatabase();
-app.listen(PORT, () => {
-  console.log(`Apex Affiliate API running on port ${PORT}`);
-  console.log(`Database: ${DB_PATH}`);
+initDatabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Apex Affiliate API running on port ${PORT}`);
+    console.log('Database: Turso (cloud SQLite)');
+  });
+}).catch(err => {
+  console.error('Failed to initialize database:', err);
+  process.exit(1);
 });
