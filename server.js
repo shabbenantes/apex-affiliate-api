@@ -89,12 +89,14 @@ app.post('/api/magic-link-request', async (req, res) => {
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Look up contact by email
-    const lookupResult = await ghlRequest(
-      `/contacts/lookup?locationId=${GHL_LOCATION_ID}&email=${encodeURIComponent(normalizedEmail)}`
+    // Look up contact by email using search endpoint
+    const searchResult = await ghlRequest(
+      `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(normalizedEmail)}`
     );
 
-    const contact = lookupResult.contact;
+    // Find exact email match from results
+    const contacts = searchResult.contacts || [];
+    const contact = contacts.find(c => c.email?.toLowerCase() === normalizedEmail);
     if (!contact || !contact.id) {
       // Don't reveal if account exists
       return res.json({ success: true, message: 'If an account exists, a login link has been sent.' });
@@ -247,12 +249,15 @@ app.post('/api/affiliate-validate', async (req, res) => {
       return res.json({ success: false, message: 'Session expired. Please log in again.' });
     }
 
-    // Look up contact by email
-    const lookupResult = await ghlRequest(
-      `/contacts/lookup?locationId=${GHL_LOCATION_ID}&email=${encodeURIComponent(email)}`
+    // Look up contact by email using search endpoint
+    const normalizedEmail = email.toLowerCase().trim();
+    const searchResult = await ghlRequest(
+      `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(normalizedEmail)}`
     );
 
-    const contact = lookupResult.contact;
+    // Find exact email match from results
+    const contacts = searchResult.contacts || [];
+    const contact = contacts.find(c => c.email?.toLowerCase() === normalizedEmail);
     if (!contact || !contact.id) {
       return res.json({ success: false, message: 'Session expired. Please log in again.' });
     }
