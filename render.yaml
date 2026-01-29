@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: apex-affiliate-api
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: GHL_API_KEY
+        sync: false
+      - key: GHL_LOCATION_ID
+        value: JLAe4EMlLxFUSRAh1pB3
+      - key: SITE_URL
+        value: https://getapexautomation.com
