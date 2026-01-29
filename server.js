@@ -26,7 +26,9 @@ const FIELD_IDS = {
   tier: 'qVmpqD8spvnEz5HA4Xf4',
   lastPayoutDate: 'YgMuqf72R9YFYu5q8m8S',
   lastPayoutAmount: 'A7Xhmqd5fFJi1Lwa4lFU',
-  stripeConnectId: 'tzjOEk2hGZPVMQykUnvz'
+  stripeConnectId: 'tzjOEk2hGZPVMQykUnvz',
+  portalToken: 'aZ1HbOIStRu1HSshTdvt',
+  tokenExpiry: 'YU4tul94Pjy6LNQpNUxF'
 };
 
 // ============================================
@@ -281,6 +283,23 @@ app.post('/api/magic-link-verify', async (req, res) => {
       sql: 'INSERT INTO tokens (email, token, type, contact_id, expires_at) VALUES (?, ?, ?, ?, ?)',
       args: [tokenRow.email, sessionToken, 'session', contact.id, sessionExpiry]
     });
+
+    // Also store session token in GHL custom fields (for n8n workflow validation)
+    try {
+      await ghlRequest(`/contacts/${contact.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          customFields: [
+            { id: FIELD_IDS.portalToken, field_value: sessionToken },
+            { id: FIELD_IDS.tokenExpiry, field_value: sessionExpiry }
+          ]
+        })
+      });
+      console.log(`Session token synced to GHL for ${tokenRow.email}`);
+    } catch (ghlError) {
+      // Log but don't fail the login - Turso is the primary source
+      console.error('Failed to sync token to GHL:', ghlError);
+    }
 
     // Delete the used magic link token
     await db.execute({ sql: 'DELETE FROM tokens WHERE id = ?', args: [tokenRow.id] });
