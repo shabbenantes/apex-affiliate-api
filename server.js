@@ -1,21 +1,24 @@
 const express = require('express');
 const cors = require('cors');
+const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// GHL Configuration
+// GHL Configuration (still used for contact lookup and email sending)
 const GHL_API_BASE = 'https://services.leadconnectorhq.com';
 const GHL_API_KEY = process.env.GHL_API_KEY || 'pit-20267a00-312f-4afb-96e1-3fa2c0ba37d8';
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || 'JLAe4EMlLxFUSRAh1pB3';
 const SITE_URL = process.env.SITE_URL || 'https://getapexautomation.com';
 
-// GHL Custom Field IDs
+// Database path - use persistent directory on Render if available
+const DATA_DIR = process.env.DATA_DIR || '/opt/render/project/data';
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, 'auth.db');
+
+// GHL Custom Field IDs (for affiliate data, not tokens)
 const FIELD_IDS = {
-  magicLinkToken: 'h9iFYRzMyzwfwzFxxQEK',
-  magicLinkExpiry: '9DnrdOkpd0s1VwihA4Ef',
-  sessionToken: 'aZ1HbOIStRu1HSshTdvt',
-  sessionExpiry: 'YU4tul94Pjy6LNQpNUxF',
   affiliateCode: '6vixXMn6Co7zax0Z26o8',
   totalReferrals: 'gsv2PY19XMQD02YkmTbL',
   activeReferrals: '2ZCLdH0fBsHBu859Wg21',
@@ -27,9 +30,58 @@ const FIELD_IDS = {
   lastPayoutAmount: 'A7Xhmqd5fFJi1Lwa4lFU'
 };
 
+// ============================================
+// DATABASE INITIALIZATION
+// ============================================
+let db;
+
+function initDatabase() {
+  // Ensure data directory exists
+  const dataDir = path.dirname(DB_PATH);
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+
+  db = new Database(DB_PATH);
+
+  // Create tokens table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL,
+      token TEXT NOT NULL UNIQUE,
+      type TEXT NOT NULL CHECK(type IN ('magic_link', 'session')),
+      contact_id TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);
+    CREATE INDEX IF NOT EXISTS idx_tokens_email_type ON tokens(email, type);
+    CREATE INDEX IF NOT EXISTS idx_tokens_expires_at ON tokens(expires_at);
+  `);
+
+  console.log(`Database initialized at ${DB_PATH}`);
+}
+
+// Clean up expired tokens periodically
+function cleanupExpiredTokens() {
+  const now = new Date().toISOString();
+  const result = db.prepare('DELETE FROM tokens WHERE expires_at < ?').run(now);
+  if (result.changes > 0) {
+    console.log(`Cleaned up ${result.changes} expired tokens`);
+  }
+}
+
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Clean up expired tokens on each request (lightweight operation)
+app.use((req, res, next) => {
+  cleanupExpiredTokens();
+  next();
+});
 
 // Helper: GHL API request
 async function ghlRequest(endpoint, options = {}) {
@@ -75,13 +127,23 @@ function buildAffiliateData(contact) {
   };
 }
 
+// Helper: Look up contact by email in GHL
+async function findContactByEmail(email) {
+  const normalizedEmail = email.toLowerCase().trim();
+  const searchResult = await ghlRequest(
+    `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(normalizedEmail)}`
+  );
+  const contacts = searchResult.contacts || [];
+  return contacts.find(c => c.email?.toLowerCase() === normalizedEmail);
+}
+
 // ============================================
 // POST /api/magic-link-request
 // Sends a magic link email to the affiliate
 // ============================================
 app.post('/api/magic-link-request', async (req, res) => {
   try {
-    const { email, portalType = 'affiliate' } = req.body;
+    const { email } = req.body;
 
     if (!email || !email.includes('@')) {
       return res.json({ success: true, message: 'If an account exists, a login link has been sent.' });
@@ -89,16 +151,9 @@ app.post('/api/magic-link-request', async (req, res) => {
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Look up contact by email using search endpoint
-    const searchResult = await ghlRequest(
-      `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(normalizedEmail)}`
-    );
-
-    // Find exact email match from results
-    const contacts = searchResult.contacts || [];
-    const contact = contacts.find(c => c.email?.toLowerCase() === normalizedEmail);
+    // Look up contact in GHL
+    const contact = await findContactByEmail(normalizedEmail);
     if (!contact || !contact.id) {
-      // Don't reveal if account exists
       return res.json({ success: true, message: 'If an account exists, a login link has been sent.' });
     }
 
@@ -110,18 +165,16 @@ app.post('/api/magic-link-request', async (req, res) => {
 
     // Generate token and expiry (15 minutes)
     const token = generateToken(64);
-    const expiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
-    // Store token in GHL
-    await ghlRequest(`/contacts/${contact.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        customFields: [
-          { id: FIELD_IDS.magicLinkToken, value: token },
-          { id: FIELD_IDS.magicLinkExpiry, value: expiry }
-        ]
-      })
-    });
+    // Delete any existing magic link tokens for this email
+    db.prepare('DELETE FROM tokens WHERE email = ? AND type = ?').run(normalizedEmail, 'magic_link');
+
+    // Store token in SQLite
+    db.prepare(`
+      INSERT INTO tokens (email, token, type, contact_id, expires_at)
+      VALUES (?, ?, 'magic_link', ?, ?)
+    `).run(normalizedEmail, token, contact.id, expiresAt);
 
     // Send magic link email via GHL
     const magicLinkUrl = `${SITE_URL}/affiliate-portal.html?token=${token}`;
@@ -150,6 +203,7 @@ app.post('/api/magic-link-request', async (req, res) => {
       })
     });
 
+    console.log(`Magic link sent to ${normalizedEmail}`);
     res.json({ success: true, message: 'If an account exists, a login link has been sent.' });
 
   } catch (error) {
@@ -164,45 +218,36 @@ app.post('/api/magic-link-request', async (req, res) => {
 // ============================================
 app.post('/api/magic-link-verify', async (req, res) => {
   try {
-    const { token, portalType = 'affiliate' } = req.body;
+    const { token } = req.body;
 
     if (!token) {
       return res.json({ success: false, message: 'This link has expired or is invalid. Please request a new one.' });
     }
 
-    // Search all contacts to find the one with this token
-    const searchResult = await ghlRequest('/contacts/search', {
-      method: 'POST',
-      body: JSON.stringify({
-        locationId: GHL_LOCATION_ID,
-        pageLimit: 100
-      })
-    });
+    // Look up token in SQLite
+    const tokenRow = db.prepare(`
+      SELECT * FROM tokens WHERE token = ? AND type = 'magic_link'
+    `).get(token);
 
-    const contacts = searchResult.contacts || [];
-    let matchedContact = null;
-    let tokenExpiry = null;
-
-    for (const contact of contacts) {
-      const storedToken = getFieldValue(contact, FIELD_IDS.magicLinkToken);
-      if (storedToken === token) {
-        matchedContact = contact;
-        tokenExpiry = getFieldValue(contact, FIELD_IDS.magicLinkExpiry);
-        break;
-      }
-    }
-
-    if (!matchedContact) {
+    if (!tokenRow) {
       return res.json({ success: false, message: 'This link has expired or is invalid. Please request a new one.' });
     }
 
     // Check if token is expired
-    if (tokenExpiry && new Date(tokenExpiry) < new Date()) {
+    if (new Date(tokenRow.expires_at) < new Date()) {
+      // Delete expired token
+      db.prepare('DELETE FROM tokens WHERE id = ?').run(tokenRow.id);
+      return res.json({ success: false, message: 'This link has expired or is invalid. Please request a new one.' });
+    }
+
+    // Look up contact in GHL to get affiliate data
+    const contact = await findContactByEmail(tokenRow.email);
+    if (!contact) {
       return res.json({ success: false, message: 'This link has expired or is invalid. Please request a new one.' });
     }
 
     // Check for affiliate-active tag
-    const tags = matchedContact.tags || [];
+    const tags = contact.tags || [];
     if (!tags.includes('affiliate-active')) {
       return res.json({ success: false, message: 'This link has expired or is invalid. Please request a new one.' });
     }
@@ -211,24 +256,25 @@ app.post('/api/magic-link-verify', async (req, res) => {
     const sessionToken = generateToken(64);
     const sessionExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
-    // Store session token and clear magic link token
-    await ghlRequest(`/contacts/${matchedContact.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        customFields: [
-          { id: FIELD_IDS.sessionToken, value: sessionToken },
-          { id: FIELD_IDS.sessionExpiry, value: sessionExpiry },
-          { id: FIELD_IDS.magicLinkToken, value: '' },
-          { id: FIELD_IDS.magicLinkExpiry, value: '' }
-        ]
-      })
-    });
+    // Delete any existing session tokens for this email
+    db.prepare('DELETE FROM tokens WHERE email = ? AND type = ?').run(tokenRow.email, 'session');
+
+    // Store session token in SQLite
+    db.prepare(`
+      INSERT INTO tokens (email, token, type, contact_id, expires_at)
+      VALUES (?, ?, 'session', ?, ?)
+    `).run(tokenRow.email, sessionToken, contact.id, sessionExpiry);
+
+    // Delete the used magic link token
+    db.prepare('DELETE FROM tokens WHERE id = ?').run(tokenRow.id);
+
+    console.log(`Session created for ${tokenRow.email}`);
 
     res.json({
       success: true,
       sessionToken,
-      email: matchedContact.email,
-      user: buildAffiliateData(matchedContact)
+      email: contact.email,
+      user: buildAffiliateData(contact)
     });
 
   } catch (error) {
@@ -249,29 +295,27 @@ app.post('/api/affiliate-validate', async (req, res) => {
       return res.json({ success: false, message: 'Session expired. Please log in again.' });
     }
 
-    // Look up contact by email using search endpoint
     const normalizedEmail = email.toLowerCase().trim();
-    const searchResult = await ghlRequest(
-      `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(normalizedEmail)}`
-    );
 
-    // Find exact email match from results
-    const contacts = searchResult.contacts || [];
-    const contact = contacts.find(c => c.email?.toLowerCase() === normalizedEmail);
-    if (!contact || !contact.id) {
-      return res.json({ success: false, message: 'Session expired. Please log in again.' });
-    }
+    // Look up session token in SQLite
+    const sessionRow = db.prepare(`
+      SELECT * FROM tokens WHERE token = ? AND email = ? AND type = 'session'
+    `).get(token, normalizedEmail);
 
-    // Verify session token
-    const storedToken = getFieldValue(contact, FIELD_IDS.sessionToken);
-    const sessionExpiry = getFieldValue(contact, FIELD_IDS.sessionExpiry);
-
-    if (!storedToken || storedToken !== token) {
+    if (!sessionRow) {
       return res.json({ success: false, message: 'Session expired. Please log in again.' });
     }
 
     // Check if session is expired
-    if (sessionExpiry && new Date(sessionExpiry) < new Date()) {
+    if (new Date(sessionRow.expires_at) < new Date()) {
+      // Delete expired session
+      db.prepare('DELETE FROM tokens WHERE id = ?').run(sessionRow.id);
+      return res.json({ success: false, message: 'Session expired. Please log in again.' });
+    }
+
+    // Look up contact in GHL to get latest affiliate data
+    const contact = await findContactByEmail(normalizedEmail);
+    if (!contact) {
       return res.json({ success: false, message: 'Session expired. Please log in again.' });
     }
 
@@ -294,10 +338,27 @@ app.post('/api/affiliate-validate', async (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  const tokenCount = db.prepare('SELECT COUNT(*) as count FROM tokens').get();
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    database: DB_PATH,
+    activeTokens: tokenCount.count
+  });
 });
 
-// Start server
+// Debug endpoint (remove in production)
+app.get('/api/debug/tokens', (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  const tokens = db.prepare('SELECT id, email, type, expires_at, created_at FROM tokens').all();
+  res.json({ tokens });
+});
+
+// Initialize database and start server
+initDatabase();
 app.listen(PORT, () => {
   console.log(`Apex Affiliate API running on port ${PORT}`);
+  console.log(`Database: ${DB_PATH}`);
 });
