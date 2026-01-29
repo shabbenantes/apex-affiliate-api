@@ -25,7 +25,8 @@ const FIELD_IDS = {
   paypalEmail: 'eEGPT1Bzyni2KnRBtMk2',
   tier: 'qVmpqD8spvnEz5HA4Xf4',
   lastPayoutDate: 'YgMuqf72R9YFYu5q8m8S',
-  lastPayoutAmount: 'A7Xhmqd5fFJi1Lwa4lFU'
+  lastPayoutAmount: 'A7Xhmqd5fFJi1Lwa4lFU',
+  stripeConnectId: 'tzjOEk2hGZPVMQykUnvz'
 };
 
 // ============================================
@@ -120,6 +121,7 @@ function generateToken(length = 64) {
 // Helper: Build affiliate data object
 function buildAffiliateData(contact) {
   return {
+    contactId: contact.id,
     name: `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
     email: contact.email,
     affiliateCode: getFieldValue(contact, FIELD_IDS.affiliateCode),
@@ -130,7 +132,8 @@ function buildAffiliateData(contact) {
     paypalEmail: getFieldValue(contact, FIELD_IDS.paypalEmail),
     tier: getFieldValue(contact, FIELD_IDS.tier),
     lastPayoutDate: getFieldValue(contact, FIELD_IDS.lastPayoutDate),
-    lastPayoutAmount: getFieldValue(contact, FIELD_IDS.lastPayoutAmount)
+    lastPayoutAmount: getFieldValue(contact, FIELD_IDS.lastPayoutAmount),
+    stripeConnectId: getFieldValue(contact, FIELD_IDS.stripeConnectId)
   };
 }
 
