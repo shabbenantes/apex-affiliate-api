@@ -6,29 +6,30 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // GHL Configuration (for contact lookup and email sending)
+// IMPORTANT: Uses Apex Automation GROUP account (for affiliates/clients)
 const GHL_API_BASE = 'https://services.leadconnectorhq.com';
-const GHL_API_KEY = process.env.GHL_API_KEY || 'pit-20267a00-312f-4afb-96e1-3fa2c0ba37d8';
-const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || 'JLAe4EMlLxFUSRAh1pB3';
+const GHL_API_KEY = process.env.GHL_API_KEY || 'pit-c05aab72-145a-4863-95a1-91e21bdb98aa';
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || 'TkagyFx8FD8MlT3Rvn87';
 const SITE_URL = process.env.SITE_URL || 'https://getapexautomation.com';
 
 // Turso Database Configuration
 const TURSO_DATABASE_URL = process.env.TURSO_DATABASE_URL;
 const TURSO_AUTH_TOKEN = process.env.TURSO_AUTH_TOKEN;
 
-// GHL Custom Field IDs (for affiliate data)
+// GHL Custom Field IDs (for affiliate data) - GROUP ACCOUNT
 const FIELD_IDS = {
-  affiliateCode: '6vixXMn6Co7zax0Z26o8',
-  totalReferrals: 'gsv2PY19XMQD02YkmTbL',
-  activeReferrals: '2ZCLdH0fBsHBu859Wg21',
-  totalEarned: 'Em7ZiyRxaaXHxZMrmjdQ',
-  pendingPayout: '77WSt5Jt6iVnpqNVfODY',
-  paypalEmail: 'eEGPT1Bzyni2KnRBtMk2',
-  tier: 'qVmpqD8spvnEz5HA4Xf4',
-  lastPayoutDate: 'YgMuqf72R9YFYu5q8m8S',
-  lastPayoutAmount: 'A7Xhmqd5fFJi1Lwa4lFU',
-  stripeConnectId: 'tzjOEk2hGZPVMQykUnvz',
-  portalToken: 'aZ1HbOIStRu1HSshTdvt',
-  tokenExpiry: 'YU4tul94Pjy6LNQpNUxF'
+  affiliateCode: 'KXY7sRntFwBkTN7959rE',
+  totalReferrals: 'hNC9kyOIfOb2zeI9jAaC',
+  activeReferrals: 'Jo7cpVkkqEc1JFC1LquF',
+  totalEarned: 'DIpZDQYLKzAYV1zeIUzI',
+  pendingPayout: 'TSzOrXfMlGJnCjdEdp7t',
+  paypalEmail: 'WLuxA5qainuxQ5D1Doho',
+  tier: '6PezLJ1KPsSuEvwW94jY',
+  lastPayoutDate: 'Is4WbRzc2bvD6NRyr3jM',
+  lastPayoutAmount: 'xRtkRwVgTfPSlOKWy6OF',
+  stripeConnectId: 'YQpNEynESJJ9h5zwiPWU',
+  portalToken: 'qHAOUXQKdzf16MdPytbZ',
+  tokenExpiry: '9vKFSFO4UJNQZHI6HqUY'
 };
 
 // ============================================
