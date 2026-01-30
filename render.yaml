@@ -8,7 +8,7 @@ services:
       - key: GHL_API_KEY
         sync: false
       - key: GHL_LOCATION_ID
-        value: JLAe4EMlLxFUSRAh1pB3
+        value: TkagyFx8FD8MlT3Rvn87
       - key: SITE_URL
         value: https://getapexautomation.com
       - key: TURSO_DATABASE_URL
